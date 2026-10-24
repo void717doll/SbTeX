@@ -1,0 +1,95 @@
+#include "cmdParser.hpp"
+#include <charconv>
+#include <cstdlib>
+#include <stdexcept>
+#include <vector>
+
+#ifndef SBTEX_FONT_DIR
+#define SBTEX_FONT_DIR ""
+#endif
+#ifndef SBTEX_SOURCE_FONT_DIR
+#define SBTEX_SOURCE_FONT_DIR ""
+#endif
+
+namespace {
+Color parseColor(const std::string& text, const std::string& option) {
+    const auto invalid = [&]() {
+        return std::runtime_error(option + " requires a hex colour such as '#fff' or '#ffffff'");
+    };
+    if ((text.size() != 4 && text.size() != 7) || text[0] != '#') throw invalid();
+    unsigned int rgb = 0;
+    for (std::size_t i = 1; i < text.size(); ++i) {
+        const char ch = text[i];
+        unsigned int digit;
+        if (ch >= '0' && ch <= '9') digit = ch - '0';
+        else if (ch >= 'a' && ch <= 'f') digit = ch - 'a' + 10;
+        else if (ch >= 'A' && ch <= 'F') digit = ch - 'A' + 10;
+        else throw invalid();
+        rgb = text.size() == 4 ? (rgb << 8) | (digit * 17) : (rgb << 4) | digit;
+    }
+    return {((rgb >> 16) & 255) / 255.0, ((rgb >> 8) & 255) / 255.0, (rgb & 255) / 255.0};
+}
+}
+
+Info getInfo(int argc, char* argv[]) {
+    Info info;
+    bool has_input = false;
+    for (int i = 1; i < argc; ++i) {
+        const std::string option = argv[i];
+        auto value = [&]() -> std::string {
+            if (++i >= argc) throw std::runtime_error("missing value for " + option);
+            return argv[i];
+        };
+        if (option == "-i" || option == "--input") {
+            info.input = value();
+            has_input = true;
+        } else if (option == "-o" || option == "--output") info.outfile = value();
+        else if (option == "-f" || option == "--font") info.font = value();
+        else if (option == "--fonts-dir") info.fonts_dir = value();
+        else if (option == "-bg" || option == "--bg") {
+            info.background = parseColor(value(), option);
+            info.recolor = true;
+        } else if (option == "-color" || option == "--color") {
+            info.color = parseColor(value(), option);
+            info.recolor = true;
+        }
+        else if (option == "--columns") {
+            const auto text = value();
+            const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), info.columns);
+            if (error != std::errc{} || end != text.data() + text.size() || info.columns < 1 || info.columns > 128)
+                throw std::runtime_error("--columns must be between 1 and 128");
+        } else if (option == "-v") ++info.verbosity;
+        else if (option == "-V") info.verbosity += 2;
+        else if (option == "-h" || option == "--help") info.help = true;
+        else if (option == "--advice") info.advice = true;
+        else throw std::runtime_error("unknown option: " + option);
+    }
+    if (!has_input && !info.help && !info.advice) throw std::runtime_error("input required: -i TEXT (see --help)");
+    if (info.font.empty() || std::filesystem::path(info.font).filename() != info.font || info.font == "." || info.font == "..")
+        throw std::runtime_error("--font must be a font name, not a path; use --fonts-dir for its parent directory");
+    return info;
+}
+
+std::filesystem::path resolveFont(const Info& info, const char* executable) {
+    namespace fs = std::filesystem;
+    std::vector<fs::path> roots;
+    if (!info.fonts_dir.empty()) roots.push_back(info.fonts_dir);
+    else if (const char* env = std::getenv("SBTEX_FONTS_DIR"); env && *env) roots.emplace_back(env);
+    else {
+        std::error_code error;
+        auto binary = fs::read_symlink("/proc/self/exe", error);
+        if (error) binary = fs::absolute(executable);
+        roots.push_back(binary.parent_path() / "fonts");
+        roots.push_back(binary.parent_path() / "../share/sbtex/fonts");
+        roots.emplace_back(SBTEX_FONT_DIR);
+        roots.emplace_back(SBTEX_SOURCE_FONT_DIR);
+    }
+    std::string searched;
+    for (const auto& root : roots) {
+        if (root.empty()) continue;
+        const auto font = root / info.font;
+        if (fs::is_directory(font / "glyphs")) return fs::weakly_canonical(font);
+        searched += "\n  " + font.string();
+    }
+    throw std::runtime_error("font '" + info.font + "' not found. Searched:" + searched + "\nUse --fonts-dir PATH or SBTEX_FONTS_DIR.");
+}
